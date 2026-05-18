@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <thread>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 
@@ -47,6 +49,7 @@ class wsa
 		WSADATA wsaData;
 		int wsaStartup;
 
+
 		// constructor
 		wsa()
 		{
@@ -57,6 +60,12 @@ class wsa
 			}
 			std::cout << wsaData.szDescription << " status: " << wsaData.szSystemStatus << std::endl;
 		}
+
+
+		// rule of three
+		wsa(const wsa&) = delete; // delete copy constructor
+		wsa &operator=(const wsa&) = delete; // delete copy assignment operator
+
 
 		// destructor
 		~wsa()
@@ -83,7 +92,7 @@ struct Endpoint
 		{
 			.S_un =
 			{
-				.S_addr = inet_addr("192.168.0.159") //- change on each machine
+				.S_addr = inet_addr("192.168.0.159") //- change on each client machine
 			}
 		}
 	};
@@ -92,6 +101,105 @@ struct Endpoint
 	{
 		.sin_family = AF_INET
 	};
+};
+
+
+// user interactions
+// static class
+class Interactions
+{
+	public:
+		// methods
+	static void inputIP() // input server ip to connect to
+	{
+		std::string ip;
+		while (true)
+		{
+			std::cout << "Enter the server's IP address: ";
+			std::getline(std::cin , ip);
+			if (inet_pton(AF_INET , ip.data() , &Endpoint::sockaddrServer.sin_addr) != 1)
+			{
+				std::cout << "Invalid input. Enter a valid IPv4 address" << std::endl;
+				continue;
+			}
+			break;
+		}
+
+
+		return;
+	}
+
+	static void inputPort() // input port to bind to
+	{
+		int port;
+		while (true)
+		{
+			std::string input;
+			std::cout << "Enter the server's port: ";
+			std::getline(std::cin , input);
+			try
+			{
+				size_t size;
+				port = std::stoi(input , &size);
+				if (size != input.size())
+				{
+					throw std::invalid_argument("stoi");
+				}
+				if (port < 1024 || port > 65535)
+				{
+					throw std::range_error("stoi");
+				}
+			}
+			catch (...)
+			{
+				std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
+				continue;
+			}
+			break;
+		}
+
+		Endpoint::sockaddrServer.sin_port = htons(port);
+		Endpoint::sockaddrClient.sin_port = htons(port);
+
+
+		return;
+	}
+
+	static std::string inputHandle() // input nickname
+	{
+		std::string handle;
+		while (true)
+		{
+			std::cout << "Enter your handle: ";
+			std::getline(std::cin , handle);
+			if (handle.empty())
+			{
+				continue;
+			}
+			break;
+		}
+
+
+		return handle;
+	}
+
+	static std::string inputMsg() // input message
+	{
+		std::string msg;
+		while (true)
+		{
+			std::cout << ">";
+			std::getline(std::cin , msg);
+			if (msg.empty())
+			{
+				continue;
+			}
+			break;
+		}
+
+
+		return msg;
+	}
 };
 
 
@@ -111,13 +219,13 @@ class sock
 			{
 				errHandle(WSAGetLastError() , "socket(AF_INET , SOCK_STREAM , IPPROTO_TCP)");
 			}
-			std::cout << "Client running" << std::endl;
+			std::cout << "Client socket created" << std::endl;
 		}
 
-		explicit sock(SOCKET sockListening) : // only used for accept()
-			sockfd(sockListening)
-			{
-			}
+
+		// rule of three
+		sock(const sock&) = delete; // delete copy constructor
+		sock &operator=(const sock&) = delete; // delete copy assignment operator
 
 
 		// destructor
@@ -131,51 +239,13 @@ class sock
 
 
 		// methods
-		void sockBind(const sockaddr_in &sockAddr) const // bind
-		{
-			if (bind(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr)) == SOCKET_ERROR)
-			{
-				errHandle(WSAGetLastError() , "bind(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr))");
-			}
-			std::cout << "Socket bound to " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
-
-
-			return;
-		}
-
-		void sockListen() const // listen
-		{
-			if (listen(sockfd , SOMAXCONN) == SOCKET_ERROR)
-			{
-				errHandle(WSAGetLastError() , "listen(sockfd , SOMAXCONN)");
-			}
-			std::cout << "Socket listening..." << std::endl;
-
-
-			return;
-		}
-
-		SOCKET sockAccept(sockaddr_in &sockAddr) const // accept
-		{
-			int sockaddrLen = sizeof(sockAddr);
-			SOCKET sockClient = accept(sockfd , reinterpret_cast<sockaddr*>(&sockAddr) , &sockaddrLen);
-			if (sockClient == INVALID_SOCKET)
-			{
-				errHandle(WSAGetLastError() , "accept(sockfd , reinterpret_cast<sockaddr*>(&sockAddr) , NULL)");
-			}
-			std::cout << "Client socket accepted @ " << sockAddr.sin_addr << std::endl << std::endl;
-
-
-			return sockClient;
-		}
-
 		void sockConnect(const sockaddr_in &sockAddr) const // connect
 		{
 			if (connect(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr)) == SOCKET_ERROR)
 			{
 				errHandle(WSAGetLastError() , "connect(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr))");
 			}
-			std::cout << "Connected to server socket @ " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
+			std::cout << "Connected to server socket @ " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl << std::endl;
 
 
 			return;
@@ -188,11 +258,10 @@ class Packet
 {
 	public:
 		// attributes
-		uint32_t _header = 0; // only used for reads, use header() for writes
 		std::string body; // message
 
 		// quasi attribute
-		inline uint32_t header() const // 4-byte message length. only used for writes, use _header for reads
+		inline uint32_t header() const // 4-byte message length
 		{
 			return static_cast<uint32_t>(body.size());
 		}
@@ -220,10 +289,6 @@ class Packet
 
 			return payload;
 		}
-
-		std::string deserialise() // deformatter, extracts message
-		{
-		}
 };
 
 
@@ -235,57 +300,75 @@ class Protocol
 		Packet packet;
 
 
-		// constructor
-		Protocol() = default; // used for reads
-
-		explicit Protocol(const std::string &msg) : // used for writes
-			packet(msg)
-			{
-			}
-
-
 		// methods
 		[[nodiscard]] std::string packetIn(SOCKET sock) // receives packet
 		{
+			uint32_t header;
+			std::string body;
+
 			int bytesReceivedHeader = 0;
-			while (bytesReceivedHeader < sizeof(packet._header))
+			while (bytesReceivedHeader < sizeof(header))
 			{
-				int bytesHeader = recv(sock , reinterpret_cast<char*>(&packet._header) + bytesReceivedHeader , sizeof(packet._header) - bytesReceivedHeader , NULL); // gets length
+				int bytesHeader = recv(sock , reinterpret_cast<char*>(&header) + bytesReceivedHeader , sizeof(header) - bytesReceivedHeader , NULL); // gets length
 				if (bytesHeader == SOCKET_ERROR)
 				{
-					errHandle(WSAGetLastError() , "recv(sock , reinterpret_cast<char*>(&packet._header) + bytesReceivedHeader , sizeof(packet._header) - bytesReceivedHeader , NULL)");
+					errHandle(WSAGetLastError() , "recv(sock , reinterpret_cast<char*>(&header) + bytesReceivedHeader , sizeof(header) - bytesReceivedHeader , NULL)");
 				}
 				if (bytesHeader == 0)
 				{
-					break;
+					return "";
 				}
 				bytesReceivedHeader += bytesHeader;
 			}
-			packet._header = ntohl(packet._header);
+			header = ntohl(header);
 
-			packet.body.resize(packet._header);
+			body.resize(header);
 
 			int bytesReceivedBody = 0;
-			while (bytesReceivedBody < packet._header)
+			while (bytesReceivedBody < header)
 			{
-				int bytesBody = recv(sock , packet.body.data() + bytesReceivedBody , packet._header - bytesReceivedBody , NULL); // reads message
+				int bytesBody = recv(sock , body.data() + bytesReceivedBody , header - bytesReceivedBody , NULL); // reads message
 				if (bytesBody == SOCKET_ERROR)
 				{
-					errHandle(WSAGetLastError() , "recv(sock , packet.body.data() + bytesReceivedBody , packet._header - bytesReceivedBody , NULL)");
+					errHandle(WSAGetLastError() , "recv(sock , body.data() + bytesReceivedBody , header - bytesReceivedBody , NULL)");
 				}
 				if (bytesBody == 0)
 				{
-					break;
+					return "";
 				}
 				bytesReceivedBody += bytesBody;
 			}
 
 
-			return packet.body;
+			return body;
 		}
 
-		void packetOut(SOCKET sock) const // sends packet
+		void packetInLoop(SOCKET sock) // recv loop for multithreading
 		{
+			while (true)
+			{
+				std::string payload = packetIn(sock);
+				if (payload.empty())
+				{
+					std::cerr << "=== CONNECTION DISCONNECTED ===" << std::endl;
+				}
+				std::cout << payload << std::endl;
+			}
+
+
+			return;
+		}
+
+		void packetOut(SOCKET sock , const std::optional<std::string>&msg = std::nullopt) // sends packet
+		{
+			if (msg)
+			{
+				packet.body = *msg;
+			}
+			else
+			{
+				packet.body = Interactions::inputMsg();
+			}
 			std::string payload = packet.serialise();
 
 			int bytesRemaining = payload.size();
@@ -308,88 +391,19 @@ class Protocol
 
 			return;
 		}
-};
 
-
-// user interactions
-// static class
-class Interactions
-{
-	public:
-		// methods
-		static void inputIP() // input server ip to connect to
+		void packetOutLoop(SOCKET sock) // send loop for multithreading
 		{
-			std::string ip;
 			while (true)
 			{
-				std::cout << "Enter the server's IP address: ";
-				std::getline(std::cin , ip);
-				if (inet_pton(AF_INET , ip.data() , &Endpoint::sockaddrServer.sin_addr) != 1)
-				{
-					std::cout << "Invalid input. Enter a valid IPv4 address" << std::endl;
-					continue;
-				}
-				break;
+				packetOut(sock);
 			}
 
 
 			return;
 		}
-
-		static void inputPort() // input port to bind to
-		{
-			int port;
-			while (true)
-			{
-				std::string input;
-				std::cout << "Enter the server's port: ";
-				std::getline(std::cin , input);
-				try
-				{
-					size_t size;
-					port = std::stoi(input , &size);
-					if (size != input.size())
-					{
-						throw std::invalid_argument("stoi");
-					}
-					if (port < 1024 || port > 65535)
-					{
-						throw std::range_error("stoi");
-					}
-				}
-				catch (...)
-				{
-					std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
-					continue;
-				}
-				break;
-			}
-
-			Endpoint::sockaddrServer.sin_port = htons(port);
-			Endpoint::sockaddrClient.sin_port = htons(port);
-
-
-			return;
-		}
-
-		static std::string inputMsg() // input message
-		{
-			std::string msg;
-			while (true)
-			{
-				std::cout << ">";
-				std::getline(std::cin , msg);
-				if (msg.empty())
-				{
-					continue;
-				}
-				break;
-			}
-
-
-			return msg;
-		}
 };
+
 
 int main()
 {
@@ -400,8 +414,14 @@ int main()
 
 	sockClient.sockConnect(Endpoint::sockaddrServer);
 
-	Protocol sendPacket(Interactions::inputMsg());
-	sendPacket.packetOut(sockClient.sockfd);
+	Protocol protocol;
+
+	protocol.packetOut(sockClient.sockfd , Interactions::inputHandle());
+	std::thread sendThread(&Protocol::packetOutLoop , &protocol , sockClient.sockfd);
+	std::thread recvThread(&Protocol::packetInLoop , &protocol , sockClient.sockfd);
+
+	sendThread.join();
+	recvThread.join();
 
 
 	return 0;
