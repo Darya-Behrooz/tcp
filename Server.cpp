@@ -32,7 +32,7 @@ inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
 	return cout << inet_ntoa(IPv4);
 }
 
-//x overloads operator<< to display port in correct byte order
+//x // overloads operator<< to display port in correct byte order
 //x inline std::ostream &operator<<(std::ostream &cout , const USHORT &port) //! can't fucking do this!
 //x {
 //x 	return cout << ntohs(port);
@@ -69,6 +69,30 @@ class wsa
 };
 
 wsa wsaStartup;
+
+
+// endpoints
+// static class
+struct Endpoint
+{
+	// attributes
+	static inline sockaddr_in sockaddrServer // server sockaddr
+	{
+		.sin_family = AF_INET ,
+		.sin_addr =
+		{
+			.S_un =
+			{
+				.S_addr = inet_addr("192.168.0.159") //- you probably want to make this 0.0.0.0
+			}
+		}
+	};
+
+	static inline sockaddr_in sockaddrClient // client sockaddr
+	{
+		.sin_family = AF_INET
+	};
+};
 
 
 // sock startup
@@ -115,6 +139,7 @@ class sock
 			}
 			std::cout << "Socket bound to " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
 
+
 			return;
 		}
 
@@ -125,6 +150,7 @@ class sock
 				errHandle(WSAGetLastError() , "listen(sockfd , SOMAXCONN)");
 			}
 			std::cout << "Socket listening..." << std::endl;
+
 
 			return;
 		}
@@ -139,7 +165,20 @@ class sock
 			}
 			std::cout << "Client socket accepted @ " << sockAddr.sin_addr << std::endl << std::endl;
 
+
 			return sockClient;
+		}
+
+		void sockConnect(const sockaddr_in &sockAddr) const // connect
+		{
+			if (connect(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr)) == SOCKET_ERROR)
+			{
+				errHandle(WSAGetLastError() , "connect(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr))");
+			}
+			std::cout << "Connected to server socket @ " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
+
+
+			return;
 		}
 };
 
@@ -150,26 +189,39 @@ class Packet
 	public:
 		// attributes
 		uint32_t _header = 0; // only used for reads, use header() for writes
-		std::string body;
+		std::string body; // message
 
 		// quasi attribute
-		inline uint32_t header() const // 4-byte message length. only used for writes, use header for reads
+		inline uint32_t header() const // 4-byte message length. only used for writes, use _header for reads
 		{
 			return static_cast<uint32_t>(body.size());
 		}
 
 
 		// constructor
-		//? Packet() = delete; // forces population at initialisation
-		//? 
-		//? explicit Packet(const std::string &msg) :
-		//? 	body(msg)
-		//? 	{
-		//? 	}
+		Packet() = default; // used for reads
+
+		explicit Packet(const std::string &msg) : // used for writes
+			body(msg)
+			{
+			}
 
 
 		// methods
-		std::string deserialise() // deformatter (extracts message)
+		std::string serialise() const // formatter, preps message for send
+		{
+			std::string payload;
+			payload.reserve(sizeof(uint32_t) + header());
+
+			uint32_t nboHeader = htonl(header());
+
+			payload.append(reinterpret_cast<const char*>(&nboHeader) , sizeof(nboHeader)).append(body);
+
+
+			return payload;
+		}
+
+		std::string deserialise() // deformatter, extracts message
 		{
 		}
 };
@@ -183,13 +235,13 @@ class Protocol
 		Packet packet;
 
 
-		//? // constructor
-		//? Protocol() = delete; // forces population at instantiation
-		//? 
-		//? explicit Protocol(const std::string &msg) :
-		//? 	packet(msg)
-		//? 	{
-		//? 	}
+		// constructor
+		Protocol() = default; // used for reads
+
+		explicit Protocol(const std::string &msg) : // used for writes
+			packet(msg)
+			{
+			}
 
 
 		// methods
@@ -228,7 +280,95 @@ class Protocol
 				bytesReceivedBody += bytesBody;
 			}
 
+
 			return packet.body;
+		}
+
+		void packetOut(SOCKET sock) const // sends packet
+		{
+			std::string payload = packet.serialise();
+
+			int bytesRemaining = payload.size();
+			int bytesSentTotal = 0;
+			while (bytesRemaining > 0)
+			{
+				int bytesSent = send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL);
+				if (bytesSent == SOCKET_ERROR)
+				{
+					errHandle(WSAGetLastError() , "send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL)");
+				}
+				if (bytesSent == 0)
+				{
+					break;
+				}
+				bytesSentTotal += bytesSent;
+				bytesRemaining -= bytesSent;
+			}
+
+
+			return;
+		}
+};
+
+
+// user interactions
+// static class
+class Interactions
+{
+	public:
+		// methods
+		static void inputPort() // input port to bind to
+		{
+			int port;
+			while (true)
+			{
+				std::string input;
+				std::cout << "Enter the TCP port to start the server on: ";
+				std::getline(std::cin , input);
+				try
+				{
+					size_t size;
+					port = std::stoi(input , &size);
+					if (size != input.size())
+					{
+						throw std::invalid_argument("stoi");
+					}
+					if (port < 1024 || port > 65535)
+					{
+						throw std::range_error("stoi");
+					}
+				}
+				catch (...)
+				{
+					std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
+					continue;
+				}
+				break;
+			}
+
+			Endpoint::sockaddrServer.sin_port = htons(port);
+			Endpoint::sockaddrClient.sin_port = htons(port);
+
+
+			return;
+		}
+
+		static std::string inputMsg() // input message
+		{
+			std::string msg;
+			while (true)
+			{
+				std::cout << ">";
+				std::getline(std::cin , msg);
+				if (msg.empty())
+				{
+					continue;
+				}
+				break;
+			}
+
+
+			return msg;
 		}
 };
 
@@ -237,53 +377,13 @@ int main()
 {
 	sock sockServer; // socket()
 
-	int port;
-	while (true)
-	{
-		std::string input;
-		std::cout << "Enter the TCP port to start the server on: ";
-		std::getline(std::cin , input);
-		try
-		{
-			size_t size;
-			port = std::stoi(input , &size);
-			if (size != input.size())
-			{
-				throw std::invalid_argument("stoi");
-			}
-			if (port < 1024 || port > 65535)
-			{
-				throw std::range_error("stoi");
-			}
-		}
-		catch (...)
-		{
-			std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
-			continue;
-		}
-		break;
-	}
+	Interactions::inputPort();
 
-	// server sock struct
-	sockaddr_in sockaddrServer
-	{
-		.sin_family = AF_INET ,
-		.sin_port = htons(port) ,
-	};
-	inet_pton(AF_INET , "192.168.0.159" , &sockaddrServer.sin_addr);
-
-	// client sock struct
-	sockaddr_in sockaddrClient
-	{
-		.sin_family = AF_INET ,
-		.sin_port = htons(port)
-	};
-
-	sockServer.sockBind(sockaddrServer);
+	sockServer.sockBind(Endpoint::sockaddrServer);
 
 	sockServer.sockListen();
 
-	sock sockClient(sockServer.sockAccept(sockaddrClient));
+	sock sockClient(sockServer.sockAccept(Endpoint::sockaddrClient)); // waiting for connect()<-
 
 	Protocol recvPacket;
 	std::cout << recvPacket.packetIn(sockClient.sockfd) << std::endl;
@@ -291,6 +391,3 @@ int main()
 
 	return 0;
 }
-
-//- create both read and write functions on both sides
-//- fix the constructors. they need to accept only strings for writes and only nothing for reads
