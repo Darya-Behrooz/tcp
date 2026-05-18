@@ -1,3 +1,5 @@
+#define NOMINMAX
+
 #pragma comment(lib, "WS2_32.lib")
 
 #include <cstdint>
@@ -5,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <WinSock2.h>
+#include <WS2tcpip.h>
 
 
 // error handling
@@ -68,30 +71,13 @@ class wsa
 wsa wsaStartup;
 
 
-// server sock struct
-sockaddr_in sockaddrServer
-{
-	.sin_family = AF_INET,
-	.sin_port = htons(42069),
-	.sin_addr =
-	{
-		.S_un =
-		{
-			.S_addr =
-			{
-				inet_addr("192.168.0.159")
-			}
-		}
-	}
-};
-
-
 // sock startup
 class sock
 {
 	public:
 		// attributes
 		SOCKET sockfd;
+
 
 		// constructor
 		sock()
@@ -101,7 +87,6 @@ class sock
 			{
 				errHandle(WSAGetLastError() , "socket(AF_INET , SOCK_STREAM , IPPROTO_TCP)");
 			}
-			std::cout << "Client running" << std::endl;
 		}
 
 		// destructor
@@ -120,7 +105,7 @@ class sock
 			{
 				errHandle(WSAGetLastError() , "connect(sockfd , reinterpret_cast<const sockaddr*>(&sockAddr) , sizeof(sockAddr))");
 			}
-			std::cout << "Connected to server socket: " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
+			std::cout << "Connected to server socket @ " << sockAddr.sin_addr << ":" << ntohs(sockAddr.sin_port) << std::endl;
 
 			return;
 		}
@@ -216,6 +201,57 @@ class Protocol
 int main()
 {
 	sock sockClient;
+	std::cout << "Client running" << std::endl;
+
+	// server sock struct
+	sockaddr_in sockaddrServer
+	{
+		.sin_family = AF_INET
+	};
+
+
+	std::string ip;
+	while (true)
+	{
+		std::cout << "Enter the server's IP address: ";
+		std::getline(std::cin , ip);
+		if (ip.empty() || inet_pton(AF_INET, ip.data(), &sockaddrServer.sin_addr) != 1)
+		{
+			std::cout << "Invalid input. Enter a valid IPv4 address" << std::endl;
+			continue;
+		}
+		break;
+	}
+
+	int port;
+	while (true)
+	{
+		std::string input;
+		std::cout << "Enter the server's port: ";
+		std::getline(std::cin , input);
+		try
+		{
+			size_t size;
+			port = std::stoi(input, &size);
+			if (size != input.size())
+			{
+				throw std::invalid_argument("stoi");
+			}
+			if (port < 1024 || port > 65535)
+			{
+				throw std::range_error("stoi");
+			}
+		}
+		catch (...)
+		{
+			std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
+			continue;
+		}
+		break;
+	}
+	sockaddrServer.sin_port = htons(port);
+
+
 	sockClient.sockConnect(sockaddrServer);
 
 	Protocol sendPacket("1234567890");
