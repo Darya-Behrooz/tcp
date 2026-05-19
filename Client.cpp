@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -26,6 +27,10 @@ static_assert(sizeof(uint32_t) == 4 , "sizeof(uint32_t) != 4\nyour compiler sure
 	LocalFree(errMsg);
 	exit(errNo);
 }
+
+
+// stdout/stderr mutex for overlapping console outputs
+std::mutex stdoutMutex;
 
 
 // overloads operator<< to display IP address in correct byte order
@@ -167,6 +172,8 @@ class Interactions
 
 	static std::string inputHandle() // input nickname
 	{
+		std::lock_guard<std::mutex> stdoutLock(stdoutMutex); // mutex lock for overlapping console outputs
+
 		std::string handle;
 		while (true)
 		{
@@ -188,7 +195,11 @@ class Interactions
 		std::string msg;
 		while (true)
 		{
-			std::cout << ">";
+			{ // prevents > from causing overlapping console outputs
+				std::lock_guard<std::mutex> stdoutLock(stdoutMutex); // mutex lock for overlapping console outputs
+
+				std::cout << ">" << std::flush;
+			}
 			std::getline(std::cin , msg);
 			if (msg.empty())
 			{
@@ -352,6 +363,9 @@ class Protocol
 				{
 					std::cerr << "=== CONNECTION DISCONNECTED ===" << std::endl;
 				}
+
+				std::lock_guard<std::mutex> stdoutLock(stdoutMutex); // mutex lock for overlapping console outputs
+
 				std::cout << payload << std::endl;
 			}
 
