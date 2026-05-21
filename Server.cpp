@@ -30,16 +30,45 @@ static_assert(sizeof(uint32_t) == 4 , "sizeof(uint32_t) != 4\nyour compiler sure
 
 
 // stdout/stderr mutex for overlapping console outputs
-std::mutex stdoutMutex;
+std::mutex consoleMutex;
 
 
-// overloads operator<< to display IP address in correct byte order
-inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
+// converts IPv4 address from string to in_addr
+inline in_addr strIPv4(const std::string &str)
 {
-	return cout << inet_ntoa(IPv4);
+	in_addr IPv4;
+
+	if (inet_pton(AF_INET , str.data() , &IPv4) != 1)
+	{
+		errHandle(WSAGetLastError() , "inet_pton(AF_INET , str.data() , &IPv4)");
+	}
+
+
+	return IPv4;
 }
 
-//x // overloads operator<< to display port in correct byte order
+// converts IPv4 address from in_addr to string
+inline std::string IPv4str(const in_addr &IPv4)
+{
+	char str[INET_ADDRSTRLEN];
+
+	if (!inet_ntop(AF_INET , &IPv4 , str , INET_ADDRSTRLEN))
+	{
+		errHandle(WSAGetLastError() , "inet_ntop(AF_INET , &IPv4 , str , INET_ADDRSTRLEN)");
+	}
+
+
+	return str;
+}
+
+
+// overloads operator<< to print IPv4 address
+inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
+{
+	return cout << IPv4str(IPv4);
+}
+
+//x // overloads operator<< to print port
 //x inline std::ostream &operator<<(std::ostream &cout , const USHORT &port) //! can't fucking do this!
 //x {
 //x 	return cout << ntohs(port);
@@ -73,7 +102,7 @@ class wsa
 
 
 		// destructor
-		~wsa()
+		~wsa() noexcept
 		{
 			if (WSACleanup() == SOCKET_ERROR)
 			{
@@ -86,20 +115,15 @@ wsa wsaStartup;
 
 
 // endpoints
-// static class
-struct Endpoint
+/*static*/struct Endpoint
 {
 	// attributes
+	static inline in_addr ipLocal = strIPv4("192.168.0.159"); //- change on each server machine
+
 	static inline sockaddr_in sockaddrServer // server sockaddr
 	{
 		.sin_family = AF_INET ,
-		.sin_addr =
-		{
-			.S_un =
-			{
-				.S_addr = inet_addr("192.168.0.159") //- you probably want to make this 0.0.0.0
-			}
-		}
+		.sin_addr = strIPv4("0.0.0.0")
 	};
 
 	static inline sockaddr_in sockaddrClient // client sockaddr
@@ -110,68 +134,89 @@ struct Endpoint
 
 
 // user interactions
-// static class
-class Interactions
+/*static*/class Interactions
 {
 	public:
+		// attributes
+		static inline std::string serverHandle; // server handle
+		static inline std::string serverPrompt; // server prompt | handle@ip>
+		static inline std::string clientHandle; // client handle
+		static inline std::string clientPrompt; // client prompt | handle@ip>
+
+
 		// methods
-	static void inputPort() // input port to bind to
-	{
-		int port;
-		while (true)
+		static void inputPort() // input port to bind to
 		{
-			std::string input;
-			std::cout << "Enter the TCP port to start the server on: ";
-			std::getline(std::cin , input);
-			try
+			int port;
+			while (true)
 			{
-				size_t size;
-				port = std::stoi(input , &size);
-				if (size != input.size())
+				std::string input;
+				std::cout << "Enter the TCP port to start the server on: ";
+				std::getline(std::cin , input);
+				try
 				{
-					throw std::invalid_argument("stoi");
+					size_t size;
+					port = std::stoi(input , &size);
+					if (size != input.size())
+					{
+						throw std::invalid_argument("stoi");
+					}
+					if (port < 1024 || port > 65535)
+					{
+						throw std::range_error("stoi");
+					}
 				}
-				if (port < 1024 || port > 65535)
+				catch (...)
 				{
-					throw std::range_error("stoi");
+					std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
+					continue;
 				}
+				break;
 			}
-			catch (...)
-			{
-				std::cout << "Invalid input. Enter a valid TCP port between 1024 and 65535" << std::endl;
-				continue;
-			}
-			break;
+
+			Endpoint::sockaddrServer.sin_port = htons(port);
+			Endpoint::sockaddrClient.sin_port = htons(port);
+
+
+			return;
 		}
 
-		Endpoint::sockaddrServer.sin_port = htons(port);
-		Endpoint::sockaddrClient.sin_port = htons(port);
-
-
-		return;
-	}
-
-	static std::string inputMsg() // input message
-	{
-		std::string msg;
-		while (true)
+		static void inputHandle() // input nickname
 		{
-			{ // prevents > from causing overlapping console outputs
-				std::lock_guard<std::mutex> stdoutLock(stdoutMutex); // mutex lock for overlapping console outputs
-
-				std::cout << ">" << std::flush;
-			}
-			std::getline(std::cin , msg);
-			if (msg.empty())
+			std::cout << "Enter your handle or hit Enter to remain anonymous: ";
+			std::getline(std::cin , serverHandle);
+			if (serverHandle.empty())
 			{
-				continue;
+				serverHandle = "Server";
 			}
-			break;
+			serverPrompt = serverHandle + "@" + IPv4str(Endpoint::ipLocal) + ">";
+
+
+			return;
 		}
 
+		static std::string inputMsg() // input message
+		{
+			std::string msg;
 
-		return msg;
-	}
+			while (true)
+			{
+				{ // prevents prompt from overlapping
+					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
+
+					std::cout << "\x1b[2K\r" << serverPrompt;
+				}
+
+				std::getline(std::cin , msg);
+				if (!msg.empty())
+				{
+					break;
+				}
+			}
+
+
+			return msg;
+		}
 };
 
 
@@ -206,7 +251,7 @@ class sock
 
 
 		// destructor
-		~sock()
+		~sock() noexcept
 		{
 			if (closesocket(sockfd) == SOCKET_ERROR)
 			{
@@ -264,7 +309,7 @@ class Packet
 		std::string body; // message
 
 		// quasi attribute
-		inline uint32_t header() const // 4-byte message length
+		inline uint32_t header() const noexcept // 4-byte message length
 		{
 			return static_cast<uint32_t>(body.size());
 		}
@@ -348,6 +393,8 @@ class Protocol
 
 		void packetInLoop(SOCKET sock) // recv loop for multithreading
 		{
+			Interactions::clientHandle = packetIn(sock);
+			Interactions::clientPrompt = Interactions::clientHandle + "@" + IPv4str(Endpoint::sockaddrClient.sin_addr) + ">";
 
 			while (true)
 			{
@@ -358,9 +405,9 @@ class Protocol
 					break;
 				}
 
-				std::lock_guard<std::mutex> stdoutLock(stdoutMutex); // mutex lock for overlapping console outputs
+				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
 
-				std::cout << payload << std::endl;
+				std::cout << "\x1b[2K\r" << Interactions::clientPrompt << payload << std::endl << Interactions::serverPrompt;
 			}
 
 
@@ -402,6 +449,13 @@ class Protocol
 
 		void packetOutLoop(SOCKET sock) // send loop for multithreading
 		{
+			{ // prevents prompt from causing overlapping console outputs
+				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
+
+				std::cout << "\r=== " << Interactions::serverHandle << "@" << IPv4str(Endpoint::ipLocal) << "'S CHATROOM ===" << std::endl;
+			}
+			packetOut(sock , "\r=== WELCOME TO " + Interactions::serverHandle + "@" + IPv4str(Endpoint::ipLocal) + "'S CHATROOM ===");
+
 			while (true)
 			{
 				packetOut(sock);
@@ -425,14 +479,19 @@ int main()
 
 	sock sockClient(sockServer.sockAccept(Endpoint::sockaddrClient)); // waiting for connect()<-
 
+	Interactions::inputHandle();
 
 	Protocol protocol;
 
-	std::thread sendThread(&Protocol::packetOutLoop , &protocol , sockClient.sockfd);
-	std::thread recvThread(&Protocol::packetInLoop , &protocol , sockClient.sockfd);
 
-	sendThread.join();
+	protocol.packetOut(sockClient.sockfd , Interactions::serverHandle);
+
+
+	std::thread recvThread(&Protocol::packetInLoop , &protocol , sockClient.sockfd);
+	std::thread sendThread(&Protocol::packetOutLoop , &protocol , sockClient.sockfd);
+
 	recvThread.join();
+	sendThread.join();
 
 
 	return 0;
