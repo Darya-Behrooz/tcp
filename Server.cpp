@@ -26,7 +26,7 @@ static_assert(sizeof(uint32_t) == 4 , "sizeof(uint32_t) != 4\nyour compiler sure
 
 
 	LocalFree(errMsg);
-	
+
 	exit(errNo);
 }
 
@@ -494,3 +494,6 @@ int main()
 
 	return 0;
 }
+
+//- todo
+//- multiple clients
