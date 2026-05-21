@@ -24,7 +24,9 @@ static_assert(sizeof(uint32_t) == 4 , "sizeof(uint32_t) != 4\nyour compiler sure
 	std::wcerr << "=== ERROR --- {" << errLocation << "} FAILED --- " << errNo << ": " << errMsg << "===" << std::endl;
 	std::cerr << "=== PROGRAM TERMINATED {" << errNo << "} ===" << std::endl;
 
+
 	LocalFree(errMsg);
+	
 	exit(errNo);
 }
 
@@ -79,18 +81,14 @@ inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
 class wsa
 {
 	public:
-		// attributes
-		WSADATA wsaData;
-		int wsaStartup;
-
-
 		// constructor
 		wsa()
 		{
-			wsaStartup = WSAStartup(MAKEWORD(2 , 2) , &wsaData);
-			if (wsaStartup)
+			WSADATA wsaData;
+			int wsaErr = WSAStartup(MAKEWORD(2 , 2) , &wsaData);
+			if (wsaErr)
 			{
-				errHandle(wsaStartup , "WSAStartup(MAKEWORD(2 , 2) , &wsaData)");
+				errHandle(wsaErr , "WSAStartup(MAKEWORD(2 , 2) , &wsaData)");
 			}
 			std::cout << wsaData.szDescription << " status: " << wsaData.szSystemStatus << std::endl;
 		}
@@ -111,7 +109,7 @@ class wsa
 		}
 };
 
-wsa wsaStartup;
+static wsa wsaStartup;
 
 
 // endpoints
@@ -426,8 +424,8 @@ class Protocol
 			}
 			std::string payload = packet.serialise();
 
-			int bytesRemaining = payload.size();
-			int bytesSentTotal = 0;
+			size_t bytesRemaining = payload.size();
+			size_t bytesSentTotal = 0;
 			while (bytesRemaining > 0)
 			{
 				int bytesSent = send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL);
