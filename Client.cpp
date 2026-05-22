@@ -7,6 +7,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <WinSock2.h>
@@ -78,7 +79,7 @@ inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
 
 
 // winsock startup
-class wsa
+struct wsa
 {
 	public:
 		// constructor
@@ -115,17 +116,18 @@ static wsa wsaStartup;
 // endpoints
 /*static*/struct Endpoint
 {
-	// attributes
-	static inline sockaddr_in sockaddrClient // client sockaddr
-	{
-		.sin_family = AF_INET ,
-		.sin_addr = strIPv4("192.168.0.159") //- change on each client machine
-	};
+	public:
+		// attributes
+		static inline sockaddr_in sockaddrClient // client sockaddr
+		{
+			.sin_family = AF_INET ,
+			.sin_addr = strIPv4("192.168.0.159") //- change on each client machine
+		};
 
-	static inline sockaddr_in sockaddrServer // server sockaddr
-	{
-		.sin_family = AF_INET
-	};
+		static inline sockaddr_in sockaddrServer // server sockaddr
+		{
+			.sin_family = AF_INET
+		};
 };
 
 
@@ -218,7 +220,7 @@ static wsa wsaStartup;
 				{ // prevents prompt from overlapping
 					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
 
-					std::cout << "\x1b[2K\r" << clientPrompt;
+					std::cout << "\x1b[2K\r" << clientPrompt; //? bug: if alice is in the middle of typing something and bob interrupts with a message, this causes alice's prompt to be redrawn and can then be erased and messed with just by holding backspace
 				}
 
 				std::getline(std::cin , msg);
@@ -285,7 +287,7 @@ class sock
 
 
 // packet handling
-class Packet
+struct Packet
 {
 	public:
 		// attributes
