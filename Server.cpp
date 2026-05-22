@@ -2,13 +2,19 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 
@@ -78,7 +84,7 @@ inline std::ostream &operator<<(std::ostream &cout , const in_addr &IPv4)
 
 
 // winsock startup
-class wsa
+struct wsa
 {
 	public:
 		// constructor
@@ -115,19 +121,65 @@ static wsa wsaStartup;
 // endpoints
 /*static*/struct Endpoint
 {
-	// attributes
-	static inline in_addr ipLocal = strIPv4("192.168.0.159"); //- change on each server machine
+	public:
+		// attributes
+		static inline in_addr ipLocal = strIPv4("192.168.0.159"); //- change on each server machine
 
-	static inline sockaddr_in sockaddrServer // server sockaddr
-	{
-		.sin_family = AF_INET ,
-		.sin_addr = strIPv4("0.0.0.0")
-	};
+		static inline sockaddr_in sockaddrServer // server sockaddr
+		{
+			.sin_family = AF_INET ,
+			.sin_addr = strIPv4("0.0.0.0")
+		};
+};
 
-	static inline sockaddr_in sockaddrClient // client sockaddr
-	{
-		.sin_family = AF_INET
-	};
+
+// client info
+struct ClientSession
+{
+	public:
+		// attributes
+		SOCKET sock; // socket
+		sockaddr_in addr; // address and port
+		std::string handle; // handle/nickname
+
+
+		// methods
+		std::string prompt() const // constructs prompt | handle@ip>
+		{
+			return handle + "@" + IPv4str(addr.sin_addr) + ">";
+		}
+};
+
+
+// multiclient handling
+class Clients //? maybe make the vector private? not now though, keep everything public for easier debugging
+{
+	public:
+		// attributes
+		std::vector<std::shared_ptr<ClientSession>> clients; // dynamic list of all connected clients
+
+		// quasi-attribute
+		inline size_t clientsCount() const // number of clients
+		{
+			return clients.size();
+		}
+
+
+		// methods
+		inline void clientAdd(const std::shared_ptr<ClientSession> &client) // adds a newly connected client to the list
+		{ //? try figuring out move semantics here to transfer ownership to the container itself
+			try
+			{
+				clients.push_back(client);
+			}
+			catch (const std::bad_alloc&)
+			{
+				errHandle(ENOMEM , "clients.push_back(client)");
+			}
+
+
+			return;
+		}
 };
 
 
@@ -138,7 +190,7 @@ static wsa wsaStartup;
 		// attributes
 		static inline std::string serverHandle; // server handle
 		static inline std::string serverPrompt; // server prompt | handle@ip>
-		static inline std::string clientHandle; // client handle
+
 		static inline std::string clientPrompt; // client prompt | handle@ip>
 
 
@@ -173,7 +225,6 @@ static wsa wsaStartup;
 			}
 
 			Endpoint::sockaddrServer.sin_port = htons(port);
-			Endpoint::sockaddrClient.sin_port = htons(port);
 
 
 			return;
@@ -202,7 +253,7 @@ static wsa wsaStartup;
 				{ // prevents prompt from overlapping
 					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
 
-					std::cout << "\x1b[2K\r" << serverPrompt;
+					std::cout << "\x1b[2K\r" << serverPrompt; //? bug: if alice is in the middle of typing something and bob interrupts with a message, this causes alice's prompt to be redrawn and can then be erased and messed with just by holding backspace
 				}
 
 				std::getline(std::cin , msg);
@@ -300,7 +351,7 @@ class sock
 
 
 // packet handling
-class Packet
+struct Packet
 {
 	public:
 		// attributes
@@ -389,14 +440,13 @@ class Protocol
 			return body;
 		}
 
-		void packetInLoop(SOCKET sock) // recv loop for multithreading
+		void packetInLoop(ClientSession &client) // recv loop for multithreading
 		{
-			Interactions::clientHandle = packetIn(sock);
-			Interactions::clientPrompt = Interactions::clientHandle + "@" + IPv4str(Endpoint::sockaddrClient.sin_addr) + ">";
+			client.handle = packetIn(client.sock);
 
 			while (true)
 			{
-				std::string payload = packetIn(sock);
+				std::string payload = packetIn(client.sock);
 				if (payload.empty())
 				{
 					std::cerr << "=== CONNECTION DISCONNECTED ===" << std::endl;
@@ -405,7 +455,7 @@ class Protocol
 
 				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
 
-				std::cout << "\x1b[2K\r" << Interactions::clientPrompt << payload << std::endl << Interactions::serverPrompt;
+				std::cout << "\x1b[2K\r" << client.prompt() << payload << std::endl << Interactions::serverPrompt;
 			}
 
 
@@ -428,7 +478,7 @@ class Protocol
 			size_t bytesSentTotal = 0;
 			while (bytesRemaining > 0)
 			{
-				int bytesSent = send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL);
+				size_t bytesSent = send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL);
 				if (bytesSent == SOCKET_ERROR)
 				{
 					errHandle(WSAGetLastError() , "send(sock , payload.data() + bytesSentTotal , bytesRemaining , NULL)");
@@ -465,31 +515,58 @@ class Protocol
 };
 
 
+// the whole fucking orchestra : client handler, thread spawning, broadcasting
+class Bouncer
+{
+	public:
+		// attributes
+		sock sockServer; // server socket
+		Clients clients; // container of clients
+		Protocol protocol; // packet/protocol handling
+
+
+		// constructor
+		Bouncer() // default
+		{
+			sockServer.sockBind(Endpoint::sockaddrServer);
+			sockServer.sockListen();
+		}
+
+
+		// methods
+		void spawnThread(const std::shared_ptr<ClientSession> client) // you get a thread you get a thread you get a thread
+		{
+			protocol.packetOut(client->sock , Interactions::serverHandle);
+
+			std::thread /*recvThread*/(&Protocol::packetInLoop , &protocol , std::ref(*client)).detach();
+			std::thread /*sendThread*/(&Protocol::packetOutLoop , &protocol , client->sock).detach();
+		}
+
+		void sockAcceptLoop() // accept loop for multiclient
+		{
+			while (true)
+			{
+				std::shared_ptr<ClientSession> client = std::make_shared<ClientSession>(); // SOCKET .sock | sockaddr_in .addr | string .handle
+
+				client->sock = sockServer.sockAccept(client->addr);
+
+				clients.clientAdd(client);
+
+				spawnThread(client);
+			}
+		}
+};
+
+
 int main()
 {
-	sock sockServer; // socket()
-
 	Interactions::inputPort();
-
-	sockServer.sockBind(Endpoint::sockaddrServer);
-
-	sockServer.sockListen();
-
-	sock sockClient(sockServer.sockAccept(Endpoint::sockaddrClient)); // waiting for connect()<-
-
 	Interactions::inputHandle();
 
-	Protocol protocol;
 
+	Bouncer bouncer; // sock .sockServer | Clients .clients | Protocol .protocol | sockAcceptLoop()
 
-	protocol.packetOut(sockClient.sockfd , Interactions::serverHandle);
-
-
-	std::thread recvThread(&Protocol::packetInLoop , &protocol , sockClient.sockfd);
-	std::thread sendThread(&Protocol::packetOutLoop , &protocol , sockClient.sockfd);
-
-	recvThread.join();
-	sendThread.join();
+	std::thread /*acceptThread*/(&Bouncer::sockAcceptLoop , &bouncer).join(); // waiting for connect()s<-
 
 
 	return 0;
