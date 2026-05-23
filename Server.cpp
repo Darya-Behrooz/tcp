@@ -10,7 +10,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -134,7 +133,7 @@ static wsa wsaStartup;
 
 
 // client info
-struct ClientSession
+struct ClientNode
 {
 	public:
 		// attributes
@@ -152,12 +151,18 @@ struct ClientSession
 
 
 // multiclient handling
-class Clients //? maybe make the vector private? not now though, keep everything public for easier debugging
+class ClientRegistry
 {
-	public:
-		// attributes
-		std::vector<std::shared_ptr<ClientSession>> clients; // dynamic list of all connected clients
+	private:
+		// mutex for the vector of clients
+		std::mutex clientsMutex;
 
+
+		// attributes
+		std::vector<std::shared_ptr<ClientNode>> clients; // dynamic list of all connected clients
+
+
+	public:
 		// quasi-attribute
 		inline size_t clientsCount() const // number of clients
 		{
@@ -165,11 +170,27 @@ class Clients //? maybe make the vector private? not now though, keep everything
 		}
 
 
+		// templates
+		template <typename callable>
+		void foreach(callable&& function) // thread-safe foreach loop, locks clientsMutex
+		{
+			std::lock_guard<std::mutex> clientsLock(clientsMutex);
+			for (const std::shared_ptr<ClientNode> &client : clients)
+			{
+				function(client);
+			}
+
+
+			return;
+		}
+
+
 		// methods
-		inline void clientAdd(const std::shared_ptr<ClientSession> &client) // adds a newly connected client to the list
-		{ //? try figuring out move semantics here to transfer ownership to the container itself
+		inline void clientAdd(const std::shared_ptr<ClientNode> &client) // adds a newly connected client to the list
+		{
 			try
 			{
+				std::lock_guard<std::mutex> clientsLock(clientsMutex); // mutex lock for clients vector access
 				clients.push_back(client);
 			}
 			catch (const std::bad_alloc&)
@@ -184,14 +205,12 @@ class Clients //? maybe make the vector private? not now though, keep everything
 
 
 // user interactions
-/*static*/class Interactions
+/*static*/class CLIconfig
 {
 	public:
 		// attributes
 		static inline std::string serverHandle; // server handle
 		static inline std::string serverPrompt; // server prompt | handle@ip>
-
-		static inline std::string clientPrompt; // client prompt | handle@ip>
 
 
 		// methods
@@ -242,29 +261,6 @@ class Clients //? maybe make the vector private? not now though, keep everything
 
 
 			return;
-		}
-
-		static std::string inputMsg() // input message
-		{
-			std::string msg;
-
-			while (true)
-			{
-				{ // prevents prompt from overlapping
-					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
-
-					std::cout << "\x1b[2K\r" << serverPrompt; //? bug: if alice is in the middle of typing something and bob interrupts with a message, this causes alice's prompt to be redrawn and can then be erased and messed with just by holding backspace
-				}
-
-				std::getline(std::cin , msg);
-				if (!msg.empty())
-				{
-					break;
-				}
-			}
-
-
-			return msg;
 		}
 };
 
@@ -351,7 +347,7 @@ class sock
 
 
 // packet handling
-struct Packet
+struct PacketSwitcher
 {
 	public:
 		// attributes
@@ -365,9 +361,9 @@ struct Packet
 
 
 		// constructor
-		Packet() = default; // used for reads
+		PacketSwitcher() = default; // used for reads
 
-		explicit Packet(const std::string &msg) : // used for writes
+		explicit PacketSwitcher(const std::string &msg) : // used for writes
 			body(msg)
 			{
 			}
@@ -392,13 +388,14 @@ struct Packet
 // protocol handling
 class Protocol
 {
-	public:
+	private:
 		// attributes
-		Packet packet;
+		PacketSwitcher packet; // packet
 
 
+	public:
 		// methods
-		[[nodiscard]] std::string packetIn(SOCKET sock) // receives packet
+		[[nodiscard]] static std::string packetIn(SOCKET sock) // receives packet
 		{
 			uint32_t header;
 			std::string body;
@@ -440,38 +437,10 @@ class Protocol
 			return body;
 		}
 
-		void packetInLoop(ClientSession &client) // recv loop for multithreading
+
+		void packetOut(SOCKET sock , const std::string &msg) // sends packet
 		{
-			client.handle = packetIn(client.sock);
-
-			while (true)
-			{
-				std::string payload = packetIn(client.sock);
-				if (payload.empty())
-				{
-					std::cerr << "=== CONNECTION DISCONNECTED ===" << std::endl;
-					break;
-				}
-
-				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
-
-				std::cout << "\x1b[2K\r" << client.prompt() << payload << std::endl << Interactions::serverPrompt;
-			}
-
-
-			return;
-		}
-
-		void packetOut(SOCKET sock , const std::optional<std::string>&msg = std::nullopt) // sends packet
-		{
-			if (msg)
-			{
-				packet.body = *msg;
-			}
-			else
-			{
-				packet.body = Interactions::inputMsg();
-			}
+			PacketSwitcher packet(msg);
 			std::string payload = packet.serialise();
 
 			size_t bytesRemaining = payload.size();
@@ -494,37 +463,20 @@ class Protocol
 
 			return;
 		}
-
-		void packetOutLoop(SOCKET sock) // send loop for multithreading
-		{
-			{ // prevents prompt from causing overlapping console outputs
-				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
-
-				std::cout << "\r=== " << Interactions::serverHandle << "@" << IPv4str(Endpoint::ipLocal) << "'S CHATROOM ===" << std::endl;
-			}
-			packetOut(sock , "\r=== WELCOME TO " + Interactions::serverHandle + "@" + IPv4str(Endpoint::ipLocal) + "'S CHATROOM ===");
-
-			while (true)
-			{
-				packetOut(sock);
-			}
-
-
-			return;
-		}
 };
 
 
-// the whole fucking orchestra : client handler, thread spawning, broadcasting
+// the whole fucking orchestra : client handler, thread spawning, rx/tx
 class Bouncer
 {
-	public:
+	private:
 		// attributes
 		sock sockServer; // server socket
-		Clients clients; // container of clients
+		ClientRegistry clients; // container of clients
 		Protocol protocol; // packet/protocol handling
 
 
+	public:
 		// constructor
 		Bouncer() // default
 		{
@@ -534,19 +486,22 @@ class Bouncer
 
 
 		// methods
-		void spawnThread(const std::shared_ptr<ClientSession> client) // you get a thread you get a thread you get a thread
+		void spawnThread(const std::shared_ptr<ClientNode> client) // you get a thread you get a thread you get a thread
 		{
-			protocol.packetOut(client->sock , Interactions::serverHandle);
+			protocol.packetOut(client->sock , CLIconfig::serverHandle);
+			protocol.packetOut(client->sock , "\r=== WELCOME TO " + CLIconfig::serverHandle + "@" + IPv4str(Endpoint::ipLocal) + "'S CHATROOM ===");
 
-			std::thread /*recvThread*/(&Protocol::packetInLoop , &protocol , std::ref(*client)).detach();
-			std::thread /*sendThread*/(&Protocol::packetOutLoop , &protocol , client->sock).detach();
+			std::thread /*rxThread*/(&Bouncer::rxLoop , std::ref(*this) , client).detach();
+
+
+			return;
 		}
 
 		void sockAcceptLoop() // accept loop for multiclient
 		{
 			while (true)
 			{
-				std::shared_ptr<ClientSession> client = std::make_shared<ClientSession>(); // SOCKET .sock | sockaddr_in .addr | string .handle
+				std::shared_ptr<ClientNode> client = std::make_shared<ClientNode>(); // SOCKET .sock | sockaddr_in .addr | string .handle
 
 				client->sock = sockServer.sockAccept(client->addr);
 
@@ -554,19 +509,106 @@ class Bouncer
 
 				spawnThread(client);
 			}
+
+
+			return;
+		}
+
+		void broadcast(const std::shared_ptr<ClientNode> &sender , const std::string &msg) // broadcast messages
+		{
+			clients.foreach([&](const std::shared_ptr<ClientNode> &client)
+			{
+				if (!sender)
+				{
+					protocol.packetOut(client->sock , CLIconfig::serverPrompt + msg);
+				}
+				else if (client != sender)
+				{
+					protocol.packetOut(client->sock , sender->prompt() + msg);
+				}
+			});
+
+
+			return;
+		}
+
+		static std::string inputMsg() // input message
+		{
+			std::string msg;
+
+			while (true)
+			{
+				{ // prevents prompt from overlapping
+					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
+
+					std::cout << "\x1b[2K\r" << CLIconfig::serverPrompt; //? bug: if alice is in the middle of typing something and bob interrupts with a message, this causes alice's prompt to be redrawn and can then be erased and messed with just by holding backspace
+				}
+
+				std::getline(std::cin , msg);
+				if (!msg.empty())
+				{
+					break;
+				}
+			}
+
+
+			return msg;
+		}
+
+		static void rxLoop(Bouncer &server , std::shared_ptr<ClientNode> sender) // recv loop for multithreading
+		{
+			sender->handle = Protocol::packetIn(sender->sock);
+
+			while (true)
+			{
+				std::string payload = Protocol::packetIn(sender->sock);
+				if (payload.empty())
+				{
+					std::cerr << "=== CONNECTION DISCONNECTED ===" << std::endl;
+					break;
+				}
+
+				{ // prevents prompt from overlapping
+					std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
+
+					std::cout << "\x1b[2K\r" << sender->prompt() << payload << std::endl << CLIconfig::serverPrompt;
+				}
+
+				server.broadcast(sender , payload);
+			}
+
+
+			return;
+		}
+
+		static void txLoop(Bouncer &server) // send loop for multithreading
+		{
+			while (true)
+			{
+				std::string payload = inputMsg();
+
+				server.broadcast(nullptr , payload);
+			}
+
+
+			return;
 		}
 };
 
 
 int main()
 {
-	Interactions::inputPort();
-	Interactions::inputHandle();
+	CLIconfig::inputPort();
+	CLIconfig::inputHandle();
 
 
-	Bouncer bouncer; // sock .sockServer | Clients .clients | Protocol .protocol | sockAcceptLoop()
+	Bouncer bouncer; // sock .sockServer | ClientRegistry .clients | Protocol .protocol | sockAcceptLoop()
+	std::cout << "\n=== WELCOME TO " << CLIconfig::serverHandle << "@" << IPv4str(Endpoint::ipLocal) << "'S CHATROOM ===" << std::endl;
 
-	std::thread /*acceptThread*/(&Bouncer::sockAcceptLoop , &bouncer).join(); // waiting for connect()s<-
+	std::thread acceptThread(&Bouncer::sockAcceptLoop , &bouncer); // waiting for connect()s<-
+	std::thread shoutThread(&Bouncer::txLoop , std::ref(bouncer));
+	acceptThread.join();
+	shoutThread.join();
 
 
 	return 0;
