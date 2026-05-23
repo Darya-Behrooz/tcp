@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
@@ -159,7 +160,7 @@ class ClientRegistry
 
 
 		// attributes
-		std::vector<std::shared_ptr<ClientNode>> clients; // dynamic list of all connected clients
+		std::vector<std::unique_ptr<ClientNode>> clients; // dynamic list of all connected clients
 
 
 	public:
@@ -175,7 +176,7 @@ class ClientRegistry
 		void foreach(callable&& function) // thread-safe foreach loop, locks clientsMutex
 		{
 			std::lock_guard<std::mutex> clientsLock(clientsMutex);
-			for (const std::shared_ptr<ClientNode> &client : clients)
+			for (const std::unique_ptr<ClientNode> &client : clients)
 			{
 				function(client);
 			}
@@ -186,12 +187,12 @@ class ClientRegistry
 
 
 		// methods
-		inline void clientAdd(const std::shared_ptr<ClientNode> &client) // adds a newly connected client to the list
+		inline void clientAdd(std::unique_ptr<ClientNode> client) // adds a newly connected client to the list
 		{
 			try
 			{
 				std::lock_guard<std::mutex> clientsLock(clientsMutex); // mutex lock for clients vector access
-				clients.push_back(client);
+				clients.push_back(std::move(client));
 			}
 			catch (const std::bad_alloc&)
 			{
@@ -202,6 +203,11 @@ class ClientRegistry
 			return;
 		}
 };
+
+namespace Registry
+{
+	inline ClientRegistry clients;
+}
 
 
 // user interactions
@@ -472,7 +478,6 @@ class Bouncer
 	private:
 		// attributes
 		sock sockServer; // server socket
-		ClientRegistry clients; // container of clients
 		Protocol protocol; // packet/protocol handling
 
 
@@ -486,7 +491,7 @@ class Bouncer
 
 
 		// methods
-		void spawnThread(const std::shared_ptr<ClientNode> client) // you get a thread you get a thread you get a thread
+		void spawnThread(ClientNode* client) // you get a thread you get a thread you get a thread
 		{
 			protocol.packetOut(client->sock , CLIconfig::serverHandle);
 			protocol.packetOut(client->sock , "\r=== WELCOME TO " + CLIconfig::serverHandle + "@" + IPv4str(Endpoint::ipLocal) + "'S CHATROOM ===");
@@ -501,28 +506,31 @@ class Bouncer
 		{
 			while (true)
 			{
-				std::shared_ptr<ClientNode> client = std::make_shared<ClientNode>(); // SOCKET .sock | sockaddr_in .addr | string .handle
+				std::unique_ptr<ClientNode> client = std::make_unique<ClientNode>(); // SOCKET .sock | sockaddr_in .addr | string .handle
 
 				client->sock = sockServer.sockAccept(client->addr);
 
-				clients.clientAdd(client);
 
-				spawnThread(client);
+				ClientNode* clientCopy = client.get();
+
+				Registry::clients.clientAdd(std::move(client));
+
+				spawnThread(clientCopy);
 			}
 
 
 			return;
 		}
 
-		void broadcast(const std::shared_ptr<ClientNode> &sender , const std::string &msg) // broadcast messages
+		void broadcast(ClientNode* sender , const std::string &msg) // broadcast messages
 		{
-			clients.foreach([&](const std::shared_ptr<ClientNode> &client)
+			Registry::clients.foreach([&](const std::unique_ptr<ClientNode> &client)
 			{
 				if (!sender)
 				{
 					protocol.packetOut(client->sock , CLIconfig::serverPrompt + msg);
 				}
-				else if (client != sender)
+				else if (client.get() != sender)
 				{
 					protocol.packetOut(client->sock , sender->prompt() + msg);
 				}
@@ -555,7 +563,7 @@ class Bouncer
 			return msg;
 		}
 
-		static void rxLoop(Bouncer &server , std::shared_ptr<ClientNode> sender) // recv loop for multithreading
+		static void rxLoop(Bouncer &server , ClientNode* sender) // recv loop for multithreading
 		{
 			sender->handle = Protocol::packetIn(sender->sock);
 
