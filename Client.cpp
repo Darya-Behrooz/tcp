@@ -205,7 +205,7 @@ static wsa wsaStartup;
 			{
 				clientHandle = "Client";
 			}
-			clientPrompt = clientHandle + "@" + IPv4str(Endpoint::sockaddrClient.sin_addr) + ">";
+			clientPrompt = clientHandle + "@" + IPv4str(Endpoint::sockaddrClient.sin_addr) + "> ";
 
 
 			return;
@@ -287,7 +287,7 @@ class sock
 
 
 // packet handling
-struct Packet
+struct PacketSwitcher
 {
 	public:
 		// attributes
@@ -301,9 +301,9 @@ struct Packet
 
 
 		// constructor
-		Packet() = default; // used for reads
+		PacketSwitcher() = default; // used for reads
 
-		explicit Packet(const std::string &msg) : // used for writes
+		explicit PacketSwitcher(const std::string &msg) : // used for writes
 			body(msg)
 			{
 			}
@@ -330,7 +330,7 @@ class Protocol
 {
 	public:
 		// attributes
-		Packet packet;
+		PacketSwitcher packet;
 
 
 		// methods
@@ -379,7 +379,7 @@ class Protocol
 		void packetInLoop(SOCKET sock) // recv loop for multithreading
 		{
 			Interactions::serverHandle = packetIn(sock);
-			Interactions::serverPrompt = Interactions::serverHandle + "@" + IPv4str(Endpoint::sockaddrServer.sin_addr) + ">";
+			Interactions::serverPrompt = Interactions::serverHandle + "@" + IPv4str(Endpoint::sockaddrServer.sin_addr) + "> ";
 
 			while (true)
 			{
@@ -392,7 +392,7 @@ class Protocol
 
 				std::lock_guard<std::mutex> consoleLock(consoleMutex); // mutex lock for overlapping console outputs
 
-				std::cout << "\x1b[2K\r" << Interactions::serverPrompt << payload << std::endl << Interactions::clientPrompt;
+				std::cout << "\x1b[2K\r" << payload << std::endl << Interactions::clientPrompt;
 			}
 
 
